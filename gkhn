@@ -1,0 +1,113 @@
+Donanım için gerekli olan 
+Minimum: 2 vCPU 4 RAM
+Önerilen: 4vCPU 8 RAM
+Kurulum
+# güncelleme
+apt update && apt upgrade -y
+sudo apt install -y curl git jq lz4 build-essential cmake perl automake autoconf libtool wget libssl-dev
+
+# Go kurulumu
+sudo rm -rf /usr/local/go
+curl -L https://go.dev/dl/go1.22.3.linux-amd64.tar.gz | sudo tar -xzf - -C /usr/local
+echo 'export PATH=$PATH:/usr/local/go/bin:$HOME/go/bin' >> $HOME/.bash_profile
+source .bash_profile
+# Gerekli repoları çekiyoruz
+git clone https://github.com/airchains-network/evm-station.git
+git clone https://github.com/airchains-network/tracks.git
+# evmos ağımızın kurulumuna başlıyoruz, bu localde çalışan kendi ağımız.
+cd evm-station
+go mod tidy
+# Bu komutla kurulumu tamamlıyoruz.
+/bin/bash ./scripts/local-setup.sh
+Sistem dosyasının sağlıklı çalışabilmesi için bir env oluşturmamız gerekiyor.
+nano ~/.rollup-env
+İçerisine girip aşağıdaki kod bloğunu olduğu gibi yapitırıp ctrl x y enter ile çıkıyoruz.
+MONIKER="localtestnet"
+KEYRING="test"
+KEYALGO="eth_secp256k1"
+LOGLEVEL="info"
+HOMEDIR="$HOME/.evmosd"
+TRACE=""
+BASEFEE=1000000000
+CONFIG=$HOMEDIR/config/config.toml
+APP_TOML=$HOMEDIR/config/app.toml
+GENESIS=$HOMEDIR/config/genesis.json
+TMP_GENESIS=$HOMEDIR/config/tmp_genesis.json
+        VAL_KEY="mykey"
+Servis dosyasını yazıyoruz. Burada kullanıcı adı olarak root ise root yazıyoruz. Root değilse user olarak değiştiriyoruz.
+sudo tee /etc/systemd/system/rolld.service > /dev/null << EOF
+[Unit]
+Description=ZK
+After=network.target
+
+[Service]
+User=root
+EnvironmentFile=/root/.rollup-env
+ExecStart=/root/evm-station/build/station-evm start --metrics "" --log_level info --json-rpc.api eth,txpool,personal,net,debug,web3 --chain-id "stationevm_1234-1"
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+Şİmdi serveisleri güncelle ve başlatma yapıyoruz.
+sudo systemctl daemon-reload
+sudo systemctl enable rolld
+sudo systemctl start rolld
+sudo journalctl -u rolld -f --no-hostname -o cat
+Burada logların aktığını gördükten sonra logları ctrl c ile durdurup çıkıyoruz.
+Şimdi bir rpc oluşturuyoruz. Bunun için önce node durduruyoruz.
+systemctl stop rolld
+Sonra app.toml dosyasına gidip rpc ayarlarını yapacağız.
+nano ~/.evmosd/config/app.toml
+JSON RPC yazan yerdeki EVM RPC yazan yerdeki adresi 0.0.0.0:8545 yapıyoruz. Kayıt edip ctrl x y enter ile çıkıp node tekrar başlatıyoruz.
+systemctl restart rolld
+Bu aşağıdaki komutla aldığımız private keyi, saklıyoruz.
+/bin/bash ./scripts/local-keys.sh
+DA layer kuruyoruz. Tercihen kolay token bulmak için eigen kullanıyorum.
+cd $HOME
+wget https://github.com/airchains-network/tracks/releases/download/v0.0.2/eigenlayer
+mkdir -p $HOME/go/bin
+chmod +x $HOME/eigenlayer
+mv $HOME/eigenlayer $HOME/go/bin
+Aşağıdaki komutdaki cüzdan adı yazan yere keyfinize göre bir isim verebilirsiniz. Ve ardından ctrl c ile kapatıp enter basın ve verilecek "public hex" kayıt edin lazım olacak ve verilen evm adresine holesky ağında 0.5 eth atın.
+eigenlayer operator keys create --key-type ecdsa CUZDANADI
+Şimdi tracks ve station kurmaya başlıyoruz.
+cd $HOME
+cd tracks
+go mod tidy
+Tracks içerisinde aşağıdaki kodu çalıştırıyoruz ve moniker yazan yere istediğimiz ismi verebiliriz. Public Hex yazan yere biraz önce aldığımız hex'i yazıyoruz.
+go run cmd/main.go init --daRpc "disperser-holesky.eigenda.xyz" --daKey "PUBLICHEX" --daType "eigen" --moniker "MONIKER" --stationRpc "http://127.0.0.1:8545" --stationAPI "http://127.0.0.1:8545" --stationType "evm"
+Şimdi tracker adres oluşturacağız. Lütfen çıktıyı yedek alın ve Airchain discord dan test tokeni almayı unutmayın.
+go run cmd/main.go keys junction --accountName TRACKERCUZDAN --accountPath $HOME/.tracks/junction-accounts/keys
+Şimdi proveri çalıştırıyoruz.
+go run cmd/main.go prover v1EVM
+Aşağıdaki kod ile node id bulup kayıt ediyoruz.
+nano ~/.tracks/config/sequencer.toml
+Aşağıdaki kod'da yukarıda tracker cüzdan adımızı yazıyoruz. Almış olduğumuz air'li adresi Tracker adres kısmına yazıyoruz, IP yazan yere ip adresimizi ve Node id yazan yere biraz önce alıp sakladığımız node id yazıyoruz.
+go run cmd/main.go create-station --accountName TRACKERCUZDAN --accountPath $HOME/.tracks/junction-accounts/keys --jsonRPC "https://junction-testnet-rpc.synergynodes.com/" --info "EVM Track" --tracks TRACKERCUZDAN-ADRESI --bootstrapNode "/ip4/IP/tcp/2300/p2p/NODEID"
+Şimdi station kurduk bunu çalıştırıyoruz.
+sudo tee /etc/systemd/system/stationd.service > /dev/null << EOF
+[Unit]
+Description=station track service
+After=network-online.target
+[Service]
+User=root
+WorkingDirectory=/root/tracks/
+ExecStart=/usr/local/go/bin/go run cmd/main.go start
+Restart=always
+RestartSec=3
+LimitNOFILE=65535
+[Install]
+WantedBy=multi-user.target
+EOF
+Aşağıdaki kod ile screen açıp çalıştırıyoruz.
+screen -S air
+sudo systemctl daemon-reload
+sudo systemctl enable stationd
+sudo systemctl restart stationd
+sudo journalctl -u stationd -f --no-hostname -o cat
+Rpc'mizi çalıştırıyoruz.
+sudo ufw allow 8545 
+Yukarıda air'li adresimizle birlikte kayıt ettiğimiz yerdeki cüzdan kelimelerimizi leap cüzdana import edip. Ardından " https://points.airchains.io/ " adresine gidip cüzdanı bağlıyoruz. Buradan sonra isterseniz manuel tx atın isterseniz 
+yeni bir screen ile otomatik tx atma dosyası oluşturun. Her 25 tx de bir POD oluşacak ve puan kazanmaya başlayacaksınız. Nodumuz hayırlı olsun.
